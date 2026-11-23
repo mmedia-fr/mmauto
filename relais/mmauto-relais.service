@@ -1,0 +1,22 @@
+# Relais de MMauto : exemple d'unité systemd, à adapter (utilisateur, chemins).
+# Pose : install -m 644 mmauto-relais.service /etc/systemd/system/
+#        systemctl daemon-reload && systemctl enable --now mmauto-relais
+[Unit]
+Description=Relais MMauto (Claude Code depuis Android Auto)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=moi
+Group=moi
+Environment=HOME=/home/moi
+Environment=PATH=/home/moi/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=VOITURE_PORT=7120
+Environment=VOITURE_HOTE=127.0.0.1
+WorkingDirectory=/opt/mmauto/relais
+ExecStart=/usr/bin/node relais.mjs
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
