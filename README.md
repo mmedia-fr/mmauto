@@ -103,7 +103,7 @@ L'adresse à saisir dans l'application est alors `https://<votre domaine>/voitur
 (`0.0.0.0`), `VOITURE_PROFIL` (`profil.json` à côté du relais), `VOITURE_ETAT`
 (`~/.local/state/claude-voiture`), `VOITURE_CARNET` (`carnet/` dans ce dossier),
 `VOITURE_EMPREINTE` (`~/.config/claude-voiture/jeton.sha256`), `VOITURE_CLAUDE`
-(`~/.local/bin/claude`).
+(`~/.local/bin/claude`), `VOITURE_NOTE_SECRET` (`~/.config/claude-voiture/note-imap.secret`).
 
 ### Le profil (`profil.json`)
 
@@ -120,12 +120,61 @@ L'adresse à saisir dans l'application est alors `https://<votre domaine>/voitur
 - `carnet` : le carnet de route ; à retirer pour s'en passer. Questions posées, consigne et
   modèle de l'interprétation des réponses, fuseau horaire, adresse du géocodage inverse,
   distance minimale d'un trajet retenu, délai de reprise d'un trajet interrompu.
+- `note` : `null`, ou la note pour le bureau (ci-dessous), seule écriture permise en voiture.
 
 **Profil en lecture seule.** Claude Code est lancé avec `--permission-mode dontAsk` (tout ce qui
 n'est pas permis est refusé sans question), la liste d'outils du profil, les réglages de
 l'utilisateur seulement (`--setting-sources user`) et les seuls serveurs MCP du profil
 (`--strict-mcp-config`). Une action demandée en voiture se prépare et attend la validation à
-l'arrêt.
+l'arrêt. Seule exception : la note pour le bureau, que le relais dépose lui-même.
+
+### La note pour le bureau (`note.mjs`, section `note` du profil)
+
+En voiture, on peut faire déposer une note dans un dossier d'une boîte IMAP, pour la traiter à
+l'arrêt. Le relais la dépose lui-même par un `APPEND` IMAP : la conversation n'a toujours aucun
+outil d'écriture, et rien ne passe par SMTP, donc rien n'est envoyé à personne.
+
+- **Dictée directe** : « note pour le bureau : … » en tête de dictée (« notes », « noter », « au
+  bureau » aussi). Le texte est déposé tel que transcrit, sans appel à Claude, puis relu. Dite
+  seule, c'est la dictée suivante qui fait la note ; « non » l'annule.
+- **Proposition de la conversation** : quand on lui demande de noter quelque chose, Claude dit la
+  note en une phrase finie par une question et termine sa réponse par
+  `<note_bureau objet="…">texte</note_bureau>`. Le relais retire le bloc de ce qui est lu, garde la
+  note en attente (`attenteMinutes`, même conversation) et ne la dépose que si la dictée suivante
+  est une confirmation entière (« oui », « vas-y », « c'est bon »…). Toute autre dictée l'abandonne.
+  La confirmation est mécanique : un texte glissé dans un document lu par la conversation ne
+  suffit pas à déposer une note.
+- **Avis** : ce que le relais a fait d'une note est joint, sous la forme « [Relais : …] », en tête
+  de la dictée suivante transmise à Claude.
+- **Échec** : la note reste dans `etat.json` (champ `notes`, avec le motif) ; aucune reprise
+  automatique. Après un refus du mot de passe, le dépôt est suspendu jusqu'au redémarrage du
+  relais : un serveur de messagerie bannit l'adresse qui insiste.
+- Le message : objet « <objet> — <objet de la note> », en-tête `X-MMauto: note` ; corps : le texte,
+  l'heure, la voie, la dictée d'origine, la conversation et la session Claude Code
+  (`claude --resume <session>`). Le dossier est créé au premier dépôt.
+
+```json
+"note": {
+  "imap": { "hote": "imap.exemple.fr", "port": 993, "utilisateur": "notes@exemple.fr" },
+  "dossier": "Notes de la voiture",
+  "de": "MMauto <notes@exemple.fr>",
+  "a": "notes@exemple.fr",
+  "objet": "Note de la voiture",
+  "attenteMinutes": 10
+}
+```
+
+`consigne` (facultative) remplace la consigne par défaut de `note.mjs`, qui apprend à la
+conversation à proposer une note ; elle doit décrire le même bloc. Le mot de passe se lit dans un
+fichier en mode 600 (tout autre mode est refusé), jamais dans le profil ni en ligne de commande ;
+de préférence un mot de passe d'application limité à IMAP :
+
+```sh
+install -m 600 /dev/null ~/.config/claude-voiture/note-imap.secret
+read -rs MDP && printf '%s\n' "$MDP" > ~/.config/claude-voiture/note-imap.secret; unset MDP
+```
+
+Essais, sans réseau : `node --test relais/note.test.mjs`.
 
 ### API
 
@@ -143,7 +192,8 @@ En-tête `X-Voiture-Jeton` ; le préfixe `/voiture` est accepté devant chaque c
 | POST | `/v1/diag` `{"lignes": [{"n", "heure", "texte"}]}` | relevé de diagnostic du téléphone, écrit au journal |
 
 Rôles des messages : `moi`, `claude`, `carnet`, `etat` (avis d'attente, effacé par la
-réponse), `avis` (lu comme une réponse, sans clore l'attente), `erreur`.
+réponse), `avis` (lu comme une réponse, sans clore l'attente), `note` (réponse du relais sur une
+note pour le bureau), `erreur`.
 
 ## Fonctionnement
 
@@ -169,7 +219,8 @@ réponse), `avis` (lu comme une réponse, sans clore l'attente), `erreur`.
 distance, véhicule) et un relevé de diagnostic sans contenu ni position, vers le relais que
 vous hébergez ; une demande par jour à l'API de GitHub pour les nouvelles versions. Le relais
 nomme les lieux par le géocodage inverse de la Géoplateforme de l'IGN (`data.geopf.fr`), qui
-reçoit donc les coordonnées de départ et d'arrivée. Le journal du relais ne contient jamais le
+reçoit donc les coordonnées de départ et d'arrivée. Avec la note pour le bureau, le relais dépose
+le texte de la note sur le serveur IMAP du profil. Le journal du relais ne contient jamais le
 contenu des messages.
 
 ## Construire
