@@ -6,6 +6,9 @@
 // outils MCP qu'une session ordinaire), avec un profil en lecture seule, puis met la
 // réponse à disposition du téléphone.
 //
+// Seule écriture : la note pour le bureau (note.mjs, section « note » du profil), que le relais
+// dépose lui-même dans une boîte IMAP, sur dictée directe ou après confirmation à voix haute.
+//
 // Aucune dépendance : Node 20.
 //
 //   GET  /v1/sante                     sans jeton — vérifie que le relais répond
@@ -29,6 +32,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { creerCarnet } from './carnet.mjs';
+import { creerNotes } from './note.mjs';
 
 const ICI = path.dirname(fileURLToPath(import.meta.url));
 const HOME = process.env.HOME || os.homedir();
@@ -39,6 +43,7 @@ const DOSSIER_ETAT = process.env.VOITURE_ETAT || path.join(HOME, '.local/state/c
 const FICHIER_EMPREINTE = process.env.VOITURE_EMPREINTE || path.join(HOME, '.config/claude-voiture/jeton.sha256');
 const CLAUDE = process.env.VOITURE_CLAUDE || path.join(HOME, '.local/bin/claude');
 const DOSSIER_CARNET = process.env.VOITURE_CARNET || path.join(DOSSIER_ETAT, 'carnet');
+const FICHIER_SECRET_NOTE = process.env.VOITURE_NOTE_SECRET || path.join(HOME, '.config/claude-voiture/note-imap.secret');
 const MESSAGES_GARDES = 200;
 const ATTENTE_MAX = 50;
 
@@ -169,7 +174,7 @@ function argumentsClaude() {
     '--allowedTools', outils.join(','),
     // Le carnet de route se lit, il ne s'écrit pas depuis la conversation.
     ...(carnet ? ['--add-dir', carnet.dossier] : []),
-    '--append-system-prompt', PROFIL.consigne + (carnet ? consigneCarnet() : ''),
+    '--append-system-prompt', PROFIL.consigne + (carnet ? consigneCarnet() : '') + (notes ? notes.consigne() : ''),
     '--model', PROFIL.modele,
     '--effort', PROFIL.effort,
   ];
@@ -186,7 +191,9 @@ function argumentsClaude() {
 
 function pomper() {
   if (enCours || enAttente.length === 0) return;
-  const texte = enAttente.splice(0).join('\n');
+  // Les avis du relais sur les notes (déposée, abandonnée…) précèdent la dictée.
+  const dicte = enAttente.splice(0).join('\n');
+  const texte = notes ? notes.prefixer(dicte) : dicte;
   const debut = Date.now();
   const filAuDepart = etat.fil.id;
   const reprise = !!etat.fil.session;
@@ -241,7 +248,9 @@ function pomper() {
       if (r.session_id && etat.fil.id === filAuDepart) {
         etat.fil.session = r.session_id;
       }
-      ajouter('claude', r.result.trim());
+      // Une note proposée par la conversation est retirée de ce qui est lu, et attend la confirmation.
+      const lu = notes ? notes.extraire(r.result.trim(), filAuDepart) : { texte: r.result.trim() };
+      ajouter('claude', lu.texte, lu.extra);
       journal('réponse', `durée=${duree}s`, `tours=${r.num_turns ?? '?'}`, `coût=${r.total_cost_usd ?? '?'}`);
     } else {
       const motif = (r?.result || erreurs || `code ${code}`).toString().replace(/\s+/g, ' ').slice(0, 300);
@@ -278,20 +287,23 @@ function derniereReponse() {
   for (let i = etat.messages.length - 1; i >= 0; i--) {
     const m = etat.messages[i];
     if (m.fil !== etat.fil.id) return null;
-    if (m.role === 'claude') return m;
+    if (m.role === 'claude' || m.role === 'note') return m;
   }
   return null;
 }
 
 function recevoir(texte) {
   const m = ajouter('moi', texte);
+  if (!NOUVEAU_FIL.test(texte) && notes?.intercepter(texte, m)) return m;
   if (NOUVEAU_FIL.test(texte)) {
+    notes?.oublier();
     nouveauFil('demandé par la dictée');
     const reste = texte.replace(NOUVEAU_FIL, '').replace(/^[\s,.:;!?-]+/, '');
     if (!reste) {
       ajouter('etat', 'Nouvelle conversation. Je vous écoute.');
       return m;
     }
+    if (notes?.intercepter(reste, m)) return m;
     enAttente.push(reste);
   } else if (ACQUIESCEMENT.test(texte) && !/\?\s*$/.test(derniereReponse()?.texte ?? '')) {
     journal('acquiescement seul, sans appel');
@@ -302,6 +314,19 @@ function recevoir(texte) {
   pomper();
   return m;
 }
+
+// --- Note pour le bureau --------------------------------------------------------
+
+const notes = PROFIL.note
+  ? creerNotes({
+      profil: PROFIL,
+      fichierSecret: FICHIER_SECRET_NOTE,
+      lireEtat: () => etat,
+      sauver,
+      ajouter,
+      journal,
+    })
+  : null;
 
 // --- Carnet de route ----------------------------------------------------------
 
@@ -393,6 +418,7 @@ const serveur = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'POST' && chemin === '/v1/fil') {
+      notes?.oublier();
       nouveauFil('demandé par le téléphone');
       const m = ajouter('etat', 'Nouvelle conversation. Je vous écoute.');
       return repondre(res, 200, { fil: etat.fil.id, seq: m.seq });
